@@ -1,0 +1,130 @@
+openapi: 3.0.3
+info:
+  title: WikiLive Backend Gateway API
+  description: MVP API для взаимодействия Frontend'а и Go Sync Engine с бизнес-логикой Kotlin Gateway (включая работу с MWS Tables).
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Локальный сервер (Kotlin Ktor)
+
+paths:
+  /api/login:
+    get:
+      summary: Получение mock-токена пользователя
+      description: Используется для авторизации на хакатоне вместо реального SSO.
+      parameters:
+        - in: query
+          name: user
+          required: true
+          schema:
+            type: string
+          description: Логин пользователя
+      responses:
+        '200':
+          description: Успешный логин
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    example: "mock-jwt-token"
+
+  /api/tables:
+    get:
+      summary: Получение списка таблиц MWS
+      description: Возвращает список всех таблиц, доступных текущему пользователю в MWS Tables.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Список таблиц
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Table'
+
+  /api/tables/{table_id}/rows/{row_id}:
+    put:
+      summary: Обновление данных в таблице
+      description: Проксирует обновление ячейки/строки из редактора в MWS Tables API.
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: table_id
+          required: true
+          schema:
+            type: string
+          description: Идентификатор таблицы в MWS
+        - in: path
+          name: row_id
+          required: true
+          schema:
+            type: string
+          description: Идентификатор изменяемой строки
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: JSON с измененными колонками и их новыми значениями
+      responses:
+        '200':
+          description: Успешно обновлено
+        '401':
+          description: Неверный токен
+        '502':
+          description: MWS API недоступно или вернуло ошибку
+
+  /api/internal/docs/{doc_id}/snapshot:
+    post:
+      summary: Внутренний эндпоинт загрузки снепшотов
+      description: Используется Go-сервером (Sync Engine) для периодического сохранения конечного состояния CRDT-документа. Доступен только для внутренних сервисов.
+      parameters:
+        - in: path
+          name: doc_id
+          required: true
+          schema:
+            type: string
+          description: Идентификатор документа
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: Бинарный дамп документа (CRDT snapshot)
+      responses:
+        '200':
+          description: Снепшот успешно сохранен в PostgreSQL
+        '400':
+          description: Некорректные данные
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Table:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "tbl_12345"
+        name:
+          type: string
+          example: "Clients Data"
+        columns:
+          type: array
+          items:
+            type: string
+          example: ["id", "name", "status"]
