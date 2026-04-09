@@ -1,0 +1,36 @@
+name: Deploy to Local PC
+
+on:
+  push:
+    branches:
+      - main 
+
+jobs:
+  deploy:
+    runs-on: self-hosted 
+
+    steps:
+      # Шаг 1: GitHub скачивает код из репозитория в свою служебную папку _work
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to destination
+        shell: powershell
+        run: |
+          if (!(Test-Path "C:/mws_tables")) { New-Item -ItemType Directory -Path "C:/mws_tables" }
+          
+          # robocopy для синхронизации папок 
+          # /MIR — зеркалирование (удалит в целевой папке то, чего нет в исходной)
+          # /XD .git — исключает папку .git, чтобы не копировать историю версий
+          robocopy . "C:/mws_tables" /MIR /XD .git /R:2 /W:5
+          
+          # эта строчка ниже нужна, чтобы GitHub не считал копирование ошибкой
+          if ($LASTEXITCODE -le 3) { $global:LASTEXITCODE = 0 }
+
+      # Шаг 3: Переходим в твою папку и перезапускаем Docker
+      - name: Docker Run
+        shell: powershell
+        run: |
+          cd "C:/mws_tables"
+          docker-compose down
+          docker-compose up -d --build
