@@ -12,6 +12,6 @@ public class BasicController {
 
     @GetMapping("/health")
     public ResponseEntity<String> getHealth() {
-        return new ResponseEntity<String>("We're all set!", HttpStatus.OK);
+        return ResponseEntity.ok("We're all set!");
     }
 }
