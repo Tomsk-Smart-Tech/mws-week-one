@@ -185,6 +185,52 @@ Grafana дашборд провижнится автоматически на `h
 4. Close Redis           → соединение с Redis закрывается
 ```
 
+## Тестирование
+
+### Запуск всех тестов одной командой
+
+```bash
+go test ./...
+```
+
+### Запуск с подробным выводом
+
+```bash
+go test -v -count=1 ./...
+```
+
+### Запуск тестов по модулям
+
+```bash
+# JWT-аутентификация (legacy-токены, HMAC-SHA256, ошибки, цвет курсора)
+go test -v ./internal/auth/...
+
+# Webhook Router (валидация JSON, broadcast, ошибки)
+go test -v ./internal/webhook/...
+
+# Mock REST API (login, tables)
+go test -v ./internal/api/...
+
+# Snapshot Worker (state management, flush, lifecycle)
+go test -v ./internal/snapshot/...
+```
+
+### Запуск с race detector
+
+```bash
+go test -race ./...
+```
+
+### Покрытие тестов
+
+| Модуль | Тестов | Что покрыто |
+|--------|--------|-------------|
+| `internal/auth` | 11 | Legacy/JWT парсинг, HMAC верификация, dev mode, fallbacks, цвета |
+| `internal/webhook` | 7 | Happy path, wrong method, invalid JSON, missing fields, no side effects |
+| `internal/api` | 4 | Login (valid/missing), Tables (list/content-type) |
+| `internal/snapshot` | 8 | UpdateState, copy safety, FlushNow, server errors, periodic flush, lifecycle |
+| **Итого** | **30** | |
+
 ## Load Tester
 
 Утилита для стресс-тестирования мьютексов, обнаружения race conditions и утечек памяти.
@@ -217,9 +263,7 @@ go run ./cmd/loadtester -bots=200 -interval=50ms -room=my-doc -addr=localhost:80
 [STATS] sent=8400  recv=831600  errors=0
 ```
 
-### Race Detector
-
-Рекомендуется запускать сервер с race detector для поиска data races:
+### Race Detector (сервер + нагрузка)
 
 ```bash
 # Терминал 1: сервер с race detector
@@ -250,6 +294,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - GATEWAY_URL=http://backend-gateway:8080
       - SNAPSHOT_INTERVAL_SEC=10
+      - JWT_SECRET=${JWT_SECRET}
     depends_on:
       - redis
 
