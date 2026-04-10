@@ -1,4 +1,4 @@
-// Package main provides a WebSocket load-testing utility for crdt-engine.
+// Package main provides a WebSocket load-testing utility for sync-server.
 // It spawns N bots that join a single room, continuously send random binary
 // payloads, and drain incoming broadcasts. Useful for detecting memory leaks,
 // race conditions, and mutex contention under heavy concurrency.
@@ -29,7 +29,7 @@ func main() {
 	bots := flag.Int("bots", 100, "number of concurrent bot connections")
 	interval := flag.Duration("interval", 100*time.Millisecond, "send interval per bot")
 	room := flag.String("room", "stress-test", "document/room ID to join")
-	addr := flag.String("addr", "localhost:8081", "crdt-engine host:port")
+	addr := flag.String("addr", "localhost:8081", "sync-server host:port")
 	payloadSize := flag.Int("size", 1024, "payload size in bytes")
 	flag.Parse()
 

@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/tomsk-smart-tech/mws-week-one/crdt-engine/internal/redis"
-	"github.com/tomsk-smart-tech/mws-week-one/crdt-engine/internal/snapshot"
+	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/redis"
+	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/snapshot"
 )
 
 // Broker abstracts Redis pub/sub so the hub doesn't import the redis package directly.
@@ -219,7 +219,7 @@ func (h *Hub) createRoom(docID string) *Room {
 
 	// Subscribe to Redis channel for this document — enables horizontal scaling.
 	sub, err := h.broker.Subscribe(docID, func(data []byte) {
-		// Message from another crdt-engine instance → broadcast to local clients.
+		// Message from another sync-server instance → broadcast to local clients.
 		room.mu.Lock()
 		defer room.mu.Unlock()
 		for client := range room.clients {
@@ -257,7 +257,7 @@ func (r *Room) broadcastLoop(broker Broker) {
 				r.snapWorker.UpdateState(env.data)
 			}
 
-			// Publish to Redis so other crdt-engine instances receive the delta.
+			// Publish to Redis so other sync-server instances receive the delta.
 			if broker != nil {
 				if err := broker.Publish(r.docID, env.data); err != nil {
 					log.Printf("[ERROR] redis publish failed room=%s: %v", r.docID, err)

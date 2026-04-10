@@ -1,4 +1,4 @@
-# crdt-engine — WikiLive Signaling Server
+# sync-server — WikiLive Signaling Server
 
 Высокопроизводительный Go-сервер для реального времени. Принимает бинарные CRDT-дельты по WebSocket и мгновенно рассылает их всем участникам документа. Не разбирает содержимое — работает чистым роутером.
 
@@ -6,7 +6,7 @@
 
 ```
 ┌──────────────┐     WebSocket (binary)     ┌───────────────┐
-│  Frontend    │ ◄──────────────────────────► │  crdt-engine  │
+│  Frontend    │ ◄──────────────────────────► │  sync-server  │
 │  (Yjs/Loro)  │                             │  (Go)         │
 └──────────────┘                             └──────┬────────┘
                                                     │
@@ -27,7 +27,7 @@
 ## Структура проекта
 
 ```
-crdt-engine/
+sync-server/
 ├── cmd/
 │   ├── server/main.go              # Точка входа, HTTP-мультиплексор, graceful shutdown
 │   └── loadtester/main.go          # Утилита стресс-тестирования (100+ ботов)
@@ -63,7 +63,7 @@ docker run -d --name redis -p 6379:6379 redis:latest
 ### 2. Запустить сервер
 
 ```bash
-cd crdt-engine
+cd sync-server
 go run ./cmd/server
 ```
 
@@ -161,7 +161,7 @@ go run ./cmd/loadtester -bots=200 -interval=50ms -room=my-doc -addr=localhost:80
 | `-bots`     | `100`          | Количество параллельных ботов           |
 | `-interval` | `100ms`        | Интервал отправки сообщений на бота     |
 | `-room`     | `stress-test`  | ID документа (комнаты)                  |
-| `-addr`     | `localhost:8081`| Адрес crdt-engine                       |
+| `-addr`     | `localhost:8081`| Адрес sync-server                       |
 | `-size`     | `1024`         | Размер payload в байтах                 |
 
 ### Вывод
@@ -189,15 +189,15 @@ go run ./cmd/loadtester -bots=50 -interval=200ms
 ### Сборка образа
 
 ```bash
-docker build -t crdt-engine .
+docker build -t sync-server .
 ```
 
 ### Запуск в docker-compose
 
 ```yaml
 services:
-  crdt-engine:
-    build: ./crdt-engine
+  sync-server:
+    build: ./sync-server
     ports:
       - "8081:8081"
     environment:

@@ -1,5 +1,5 @@
 // Package redis provides a Pub/Sub broker backed by Redis for cross-instance
-// broadcast of CRDT deltas between multiple crdt-engine replicas.
+// broadcast of CRDT deltas between multiple sync-server replicas.
 package redis
 
 import (
