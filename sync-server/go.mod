@@ -1,4 +1,4 @@
-module github.com/tomsk-smart-tech/mws-week-one/crdt-engine
+module github.com/tomsk-smart-tech/mws-week-one/sync-server
 
 go 1.22.0
 

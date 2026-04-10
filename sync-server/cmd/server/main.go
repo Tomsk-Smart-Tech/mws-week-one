@@ -1,4 +1,4 @@
-// Package main is the entry point for the crdt-engine signaling server.
+// Package main is the entry point for the sync-server signaling server.
 // It wires together WebSocket hub, Redis pub/sub, mock REST API handlers,
 // and orchestrates graceful shutdown with snapshot persistence.
 package main
@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tomsk-smart-tech/mws-week-one/crdt-engine/internal/api"
-	iredis "github.com/tomsk-smart-tech/mws-week-one/crdt-engine/internal/redis"
-	"github.com/tomsk-smart-tech/mws-week-one/crdt-engine/internal/websocket"
+	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/api"
+	iredis "github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/redis"
+	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/websocket"
 )
 
 func main() {
@@ -70,7 +70,7 @@ func main() {
 
 	// --------------- Start listening ---------------
 	go func() {
-		log.Printf("[INFO] crdt-engine listening on :%s (gateway=%s, snapshot=%v)", port, gatewayURL, snapshotInterval)
+		log.Printf("[INFO] sync-server listening on :%s (gateway=%s, snapshot=%v)", port, gatewayURL, snapshotInterval)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[FATAL] server error: %v", err)
 		}
@@ -105,7 +105,7 @@ func main() {
 	log.Println("[INFO] step 4/4: closing Redis connection...")
 	broker.Close()
 
-	log.Println("[INFO] crdt-engine stopped cleanly")
+	log.Println("[INFO] sync-server stopped cleanly")
 }
 
 // envOrDefault reads an environment variable or returns a fallback.
