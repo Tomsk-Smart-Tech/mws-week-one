@@ -1,14 +1,10 @@
 # Техническая спецификация проекта WikiLive (MWS Knowledge Fabric)
 
-WikiLive — это локально развертываемая гибридная корпоративная вики-система. Проект сочетает в себе блочный CRDT-редактор текста в реальном времени (на базе Yjs/Loro) и строгие реляционные данные, интегрируясь с облачным MWS Tables.
-
-Ниже представлена полная системная архитектура проекта, собранная для быстрого понимания инфраструктуры и информационных потоков.
-
----
+**WikiLive** — это локально развертываемая гибридная корпоративная вики-система. Проект сочетает в себе блочный CRDT-редактор текста в реальном времени (на базе Yjs + Tiptap/Lexical с MIT лицензией) и строгие реляционные данные, глубоко интегрируясь с облачным MWS Tables.
 
 ## 1. Топология Системы (C4 Model - Container Level)
 
-Общая схема взаимодействия контейнеров в пределах локального деплоя `docker-compose`:
+Система спроектирована для надежного однострочного запуска через `docker-compose`, как требует регламент хакатона.
 
 ```mermaid
 graph TD
@@ -17,46 +13,54 @@ graph TD
     subgraph "Локальная Инфраструктура (Docker Compose)"
         Nginx["Nginx (Reverse Proxy)"]
         
-        Frontend["Frontend (React + Yjs/Loro)"]
-        Gateway["Backend Gateway (Java/Kotlin Ktor)"]
+        Frontend["Frontend (React + Yjs)<br/>Локальный кэш (IndexedDB)"]
+        Gateway["Backend Gateway (Java Spring Boot)"]
         SyncEngine["Sync Engine (Go)"]
-        AINode["AI Node (Python)"]
+        AINode["AI & Graph Node (Python FastAPI)"]
         
         PostgreSQL[(PostgreSQL)]
         Redis[(Redis Pub/Sub)]
-        ChromaDB[(ChromaDB)]
+        ChromaDB[(ChromaDB - Vector DB)]
     end
     
-    MWS["MWS Tables API (Внешнее Облако)"]
+    MWS["MWS Tables API / MWS GPT (Внешнее Облако)"]
     
-    User -- "HTTP REST / WS" --> Nginx
+    User -- "HTTP REST / UI" --> Nginx
     
-    Nginx -- "Статика" --> Frontend
-    Nginx -- "HTTP API" --> Gateway
-    Nginx -- "ws:// (Бинарные дельты)" --> SyncEngine
+    Nginx -- "Статика & UI" --> Frontend
+    Nginx -- "HTTP API (/api/*)" --> Gateway
+    Nginx -- "ws:// (/ws/* - Бинарные дельты Yjs)" --> SyncEngine
+    Nginx -- "HTTP API (/ai/*)" --> AINode
     
     SyncEngine -- "Pub/Sub масштабирование" --> Redis
-    SyncEngine -- "Автосохранение снепшота (HTTP POST)" --> Gateway
+    SyncEngine -- "Извлечение связей (Backlinks)" --> Gateway
+    SyncEngine -- "Автосохранение снепшотов" --> Gateway
     
-    Gateway -- "Read/Write стейт и метаданные" --> PostgreSQL
+    Gateway -- "CRUD метаданных, версий, ссылок" --> PostgreSQL
     Gateway -- "Проксирование с API-ключом" --> MWS
-    Gateway -- "Запросы генерации контента" --> AINode
     
     AINode -- "Векторный поиск" --> ChromaDB
+    AINode -- "Промпты для генерации/сайдбара" --> MWS
 ```
+
+**Разделение ответственности:**
+*   **Frontend (React):** Отрисовка UI по Design Kit, slash-menu, горячие клавиши. In-line сохранение в локальный кэш браузера при обрыве сети.
+*   **Backend (Java):** Авторизация, управление воркспейсами, REST API таблиц (проксирование в MWS).
+*   **Sync Engine (Go + Redis):** Обработка WebSockets, коллаборативное редактирование, парсинг ссылок внутри текста при сохранении (для графа и Backlinks).
+*   **AI Node (Python):** Работа с MWS GPT, генерация блоков, анализ связей для графа.
 
 ---
 
 ## 2. Модель Данных (ERD PostgreSQL)
 
-Минималистичная схема хранения метаданных и бинарных снепшотов для MVP:
+Схема расширена для поддержки обязательных требований (Backlinks) и дополнительных баллов (Версионирование, Комментарии).
 
 ```mermaid
 erDiagram
     users {
         uuid id PK
         string name
-        string mock_token
+        string mws_mock_token
     }
     
     workspaces {
@@ -69,48 +73,98 @@ erDiagram
         uuid id PK
         uuid workspace_id FK
         string title
-        bytea document_state "Бинарный снепшот от Go Sync Engine"
         timestamp updated_at
     }
     
+    document_snapshots {
+        uuid id PK
+        uuid page_id FK
+        bytea document_state "Бинарный дамп Yjs"
+        timestamp created_at "Для истории правок / версионирования"
+    }
+    
+    page_links {
+        uuid source_page_id FK
+        uuid target_page_id FK
+        timestamp created_at "Для графа и обратных ссылок (Backlinks)"
+    }
+    
+    comments {
+        uuid id PK
+        uuid page_id FK
+        string block_id "ID блока текста"
+        string content
+        timestamp created_at
+    }
+
     workspaces ||--o{ pages : "содержит"
     users }|--o{ workspaces : "участвует"
+    pages ||--o{ document_snapshots : "имеет версии"
+    pages ||--o{ page_links : "ссылается на"
+    pages ||--o{ page_links : "на нее ссылаются"
+    pages ||--o{ comments : "обсуждается"
 ```
+
+*Примечание по наполнению `page_links`:* Когда Go Sync Engine сохраняет финальный дамп документа в БД, он асинхронно парсит текст/JSON на наличие паттернов ссылок `[[page_id]]` или `href="/page/{id}"` и дергает внутренний эндпоинт Java Gateway для обновления таблицы `page_links`.
 
 ---
 
-## 3. Флоу обновления ячейки MWS (Sequence Diagram)
+## 3. Интеграция с MWS Tables: Массовое обновление (Sequence Diagram)
 
-Самый сложный гибридный процесс системы: изменение данных во внешнем источнике (MWS Tables) непосредственно из текстового документа, минуя CRDT-движок.
+Флоу обновления ячеек таблицы внутри страницы. Использование метода `PATCH` для предотвращения спама запросами (учитываем массовое выделение или D&D).
 
 ```mermaid
 sequenceDiagram
     actor U as Пользователь
     participant F as Frontend (React Widget)
-    participant K as Backend Gateway (Kotlin)
+    participant K as Backend Gateway (Java)
     participant M as MWS Tables API (Cloud)
 
-    U->>F: Изменяет значение в виджете таблицы
-    F->>F: Блокирует виджет (отображает лоадер)
-    F->>K: PUT /api/tables/{table_id}/rows/{row_id}<br/>Authorization: Bearer <mock_token>
+    U->>F: Переносит 3 карточки (массовое изменение)
+    F->>F: Дебаунс (Debounce 300ms) / Сбор изменений
+    F->>F: Блокирует UI виджета (Soft loader)
+    F->>K: PATCH /api/tables/{table_id}/records<br/>Body: [ {id, fields}, {id, fields} ]
     
     activate K
-    K->>K: Валидирует токен пользователя
-    K->>K: Подменяет токен на боевой API-ключ MWS
-    K->>M: Проксирует HTTP PUT запрос (JSON)
+    K->>K: Валидация + Подмена токена на боевой MWS Key
+    K->>M: Проксирует HTTP PATCH (Batch Update)
     
     activate M
     M-->>K: 200 OK (Данные сохранены в MWS)
     deactivate M
     
-    K->>K: Логирование / сохранение метаданных (Postgres)
-    K-->>F: 200 OK (Ответ для фронтенда)
+    K->>K: (Опционально) Логирование действия
+    K-->>F: 200 OK
     deactivate K
     
-    F->>F: Снимает лоадер
-    F->>U: Отрисовывает обновленное значение ячейки
+    F->>F: Снимает лоадер, показывает Success
 ```
 
 ---
 
-*Спецификация API Backend шлюза выделена в отдельный файл `docs/openapi.yaml`.*
+## 4. Двусторонняя синхронизация: "Живая" таблица
+
+Как фронтенд узнает, что данные в MWS Tables изменил кто-то другой (или другой сервис)? Т.к. вебхуков нет, реализуем Smart Polling (Опрос).
+
+```mermaid
+sequenceDiagram
+    participant F as Frontend (React Widget)
+    participant K as Backend Gateway (Java)
+    participant M as MWS Tables API (Cloud)
+
+    loop Каждые 10-15 секунд (если вкладка активна)
+        F->>K: GET /api/tables/{table_id}/records?since={last_sync_timestamp}
+        activate K
+        K->>M: GET /fusion/v1/datasheets/{dstId}/records
+        activate M
+        M-->>K: Возвращает актуальные строки
+        deactivate M
+        K-->>F: Отдает Diff (только изменившиеся строки)
+        deactivate K
+        
+        opt Если есть изменения
+            F->>F: Реактивно обновляет ячейки (без перезагрузки всей страницы)
+        end
+    end
+```
+*Альтернатива:* Polling может делать Java Backend на своей стороне и при наличии изменений пушить их во Frontend через WebSocket (Go Sync Engine). Для хакатона вариант с фронтенд-поллингом (показан выше) надежнее и проще в реализации.
