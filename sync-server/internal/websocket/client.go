@@ -20,11 +20,14 @@ const (
 
 // Client represents a single WebSocket connection within a Room.
 type Client struct {
-	hub    *Hub
-	room   *Room
-	conn   *websocket.Conn
-	send   chan []byte
-	userID string
+	hub         *Hub
+	room        *Room
+	conn        *websocket.Conn
+	send        chan []byte // binary CRDT deltas
+	systemSend  chan []byte // JSON system/awareness events (text messages)
+	userID      string
+	userName    string
+	cursorColor string
 }
 
 // readPump pumps messages from the WebSocket connection to the Room broadcast.
@@ -54,11 +57,14 @@ func (c *Client) readPump() {
 		if mt == websocket.BinaryMessage {
 			c.room.broadcast <- &envelope{sender: c, data: data}
 		}
+		// Text messages from clients are intentionally ignored —
+		// system events flow server→client only.
 	}
 }
 
 // writePump pumps messages from the send channel to the WebSocket connection.
 // It runs in its own goroutine and guarantees that at most one writer exists per connection.
+// It multiplexes binary CRDT data (from send) and JSON system events (from systemSend).
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -79,6 +85,18 @@ func (c *Client) writePump() {
 				log.Printf("[WARN] ws write error (user=%s, room=%s): %v", c.userID, c.room.docID, err)
 				return
 			}
+
+		case sysMsg, ok := <-c.systemSend:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				return
+			}
+			// System events (awareness, reload_table) are sent as text/JSON.
+			if err := c.conn.WriteMessage(websocket.TextMessage, sysMsg); err != nil {
+				log.Printf("[WARN] ws system write error (user=%s, room=%s): %v", c.userID, c.room.docID, err)
+				return
+			}
+
 		case <-ticker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {

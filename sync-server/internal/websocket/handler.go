@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/auth"
 )
 
 // upgrader configures the WebSocket upgrade, allowing all origins for local dev.
@@ -13,6 +14,15 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+// jwtSecret is set from main.go via SetJWTSecret. Empty = skip verification (dev mode).
+var jwtSecret string
+
+// SetJWTSecret configures the HMAC secret used for JWT verification.
+// If empty, signature verification is skipped (backward-compatible dev mode).
+func SetJWTSecret(secret string) {
+	jwtSecret = secret
 }
 
 // HandleWS returns an http.HandlerFunc that upgrades requests on /ws/doc/{doc_id}
@@ -27,14 +37,26 @@ func HandleWS(hub *Hub) http.HandlerFunc {
 			return
 		}
 
-		// ---------- Parse token (placeholder auth) ----------
+		// ---------- Parse and verify JWT token ----------
 		token := r.URL.Query().Get("token")
 		if token == "" {
-			http.Error(w, `{"error":"missing token query parameter"}`, http.StatusUnauthorized)
+			// Also check Authorization header.
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				token = strings.TrimPrefix(authHeader, "Bearer ")
+			}
+		}
+		if token == "" {
+			http.Error(w, `{"error":"missing token"}`, http.StatusUnauthorized)
 			return
 		}
-		// TODO: validate JWT via Backend Gateway. For now accept any non-empty token.
-		userID := parseUserFromToken(token)
+
+		claims, err := auth.ParseJWT(token, jwtSecret)
+		if err != nil {
+			log.Printf("[WARN] jwt auth failed: %v", err)
+			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+			return
+		}
 
 		// ---------- Upgrade to WebSocket ----------
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -44,11 +66,14 @@ func HandleWS(hub *Hub) http.HandlerFunc {
 		}
 
 		client := &Client{
-			hub:    hub,
-			room:   &Room{docID: docID}, // temporary; will be replaced by Hub with the real Room
-			conn:   conn,
-			send:   make(chan []byte, 256),
-			userID: userID,
+			hub:         hub,
+			room:        &Room{docID: docID}, // temporary; will be replaced by Hub with the real Room
+			conn:        conn,
+			send:        make(chan []byte, 256),
+			systemSend:  make(chan []byte, 16),
+			userID:      claims.UserID,
+			userName:    claims.Name,
+			cursorColor: claims.CursorColor,
 		}
 
 		hub.register <- client
@@ -69,15 +94,4 @@ func extractDocID(path string) string {
 	// Strip trailing slash if any.
 	docID = strings.TrimRight(docID, "/")
 	return docID
-}
-
-// parseUserFromToken extracts a user identifier from the token string.
-// In production this would decode and verify a JWT; here we use a naive approach.
-func parseUserFromToken(token string) string {
-	// Convention: "fake-jwt-token-for-{username}"
-	const prefix = "fake-jwt-token-for-"
-	if strings.HasPrefix(token, prefix) {
-		return strings.TrimPrefix(token, prefix)
-	}
-	return "anonymous"
 }

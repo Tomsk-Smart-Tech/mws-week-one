@@ -2,11 +2,13 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/metrics"
 	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/redis"
 	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/snapshot"
 )
@@ -21,6 +23,15 @@ type Broker interface {
 type envelope struct {
 	sender *Client
 	data   []byte
+}
+
+// AwarenessInfo is the server-authoritative user presence info injected
+// into the WebSocket stream on connect so clients can't spoof their identity.
+type AwarenessInfo struct {
+	Type        string `json:"type"`         // "awareness"
+	UserID      string `json:"user_id"`
+	Name        string `json:"name"`
+	CursorColor string `json:"cursor_color"`
 }
 
 // Room is a set of clients editing the same document.
@@ -145,6 +156,28 @@ func (h *Hub) ShutdownGraceful(ctx context.Context) {
 	log.Println("[INFO] graceful shutdown complete: all rooms flushed and closed")
 }
 
+// BroadcastSystemEvent sends a JSON system event (e.g. reload_table)
+// to ALL clients in ALL active rooms as a TextMessage.
+// This implements the webhook.RoomBroadcaster interface.
+func (h *Hub) BroadcastSystemEvent(data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	metrics.WebhookEventsTotal.Inc()
+
+	for _, room := range h.rooms {
+		room.mu.Lock()
+		for client := range room.clients {
+			select {
+			case client.systemSend <- data:
+			default:
+				log.Printf("[WARN] dropping system event for slow client user=%s room=%s", client.userID, room.docID)
+			}
+		}
+		room.mu.Unlock()
+	}
+}
+
 // addClient registers a client in its room, creating the room if needed.
 func (h *Hub) addClient(c *Client) {
 	h.mu.Lock()
@@ -162,7 +195,31 @@ func (h *Hub) addClient(c *Client) {
 	clientCount := len(room.clients)
 	room.mu.Unlock()
 
+	metrics.ActiveWSConnections.Inc()
 	log.Printf("[INFO] client joined room=%s user=%s (clients=%d)", room.docID, c.userID, clientCount)
+
+	// Send server-authoritative awareness info to the new client.
+	h.sendAwareness(c)
+}
+
+// sendAwareness pushes the server-injected user identity to the client
+// so the frontend can trust user_id, name, and cursor_color.
+func (h *Hub) sendAwareness(c *Client) {
+	info := AwarenessInfo{
+		Type:        "awareness",
+		UserID:      c.userID,
+		Name:        c.userName,
+		CursorColor: c.cursorColor,
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		log.Printf("[ERROR] failed to marshal awareness info: %v", err)
+		return
+	}
+	select {
+	case c.systemSend <- data:
+	default:
+	}
 }
 
 // removeClient unregisters a client and cleans up empty rooms.
@@ -179,10 +236,12 @@ func (h *Hub) removeClient(c *Client) {
 	if _, ok := room.clients[c]; ok {
 		delete(room.clients, c)
 		close(c.send)
+		close(c.systemSend)
 	}
 	remaining := len(room.clients)
 	room.mu.Unlock()
 
+	metrics.ActiveWSConnections.Dec()
 	log.Printf("[INFO] client left room=%s user=%s (remaining=%d)", room.docID, c.userID, remaining)
 
 	// Last client left → final snapshot + room teardown.
@@ -198,6 +257,7 @@ func (h *Hub) removeClient(c *Client) {
 		}
 		h.teardownRoom(room)
 		delete(h.rooms, room.docID)
+		metrics.ActiveRooms.Dec()
 		log.Printf("[INFO] room destroyed room=%s", room.docID)
 	}
 }
@@ -225,7 +285,9 @@ func (h *Hub) createRoom(docID string) *Room {
 		for client := range room.clients {
 			select {
 			case client.send <- data:
+				metrics.MessagesBroadcastTotal.Inc()
 			default:
+				metrics.MessagesDroppedTotal.Inc()
 				log.Printf("[WARN] dropping message for slow client user=%s room=%s", client.userID, docID)
 			}
 		}
@@ -239,6 +301,7 @@ func (h *Hub) createRoom(docID string) *Room {
 	// Start broadcast loop.
 	go room.broadcastLoop(h.broker)
 
+	metrics.ActiveRooms.Inc()
 	log.Printf("[INFO] room created room=%s (snapshot every %v)", docID, h.config.SnapshotInterval)
 	return room
 }
@@ -252,6 +315,9 @@ func (r *Room) broadcastLoop(broker Broker) {
 			if !ok {
 				return
 			}
+
+			metrics.CRDTDeltasTotal.Inc()
+
 			// Update cached state for snapshot persistence.
 			if r.snapWorker != nil {
 				r.snapWorker.UpdateState(env.data)
@@ -272,7 +338,9 @@ func (r *Room) broadcastLoop(broker Broker) {
 				}
 				select {
 				case client.send <- env.data:
+					metrics.MessagesBroadcastTotal.Inc()
 				default:
+					metrics.MessagesDroppedTotal.Inc()
 					log.Printf("[WARN] dropping message for slow client user=%s room=%s", client.userID, r.docID)
 				}
 			}
@@ -303,6 +371,7 @@ func (h *Hub) teardownRoom(room *Room) {
 	room.mu.Lock()
 	for client := range room.clients {
 		close(client.send)
+		close(client.systemSend)
 		delete(room.clients, client)
 	}
 	room.mu.Unlock()

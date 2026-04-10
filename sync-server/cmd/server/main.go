@@ -1,6 +1,6 @@
 // Package main is the entry point for the sync-server signaling server.
 // It wires together WebSocket hub, Redis pub/sub, mock REST API handlers,
-// and orchestrates graceful shutdown with snapshot persistence.
+// Prometheus metrics, MWS webhook router, JWT auth, and graceful shutdown.
 package main
 
 import (
@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/api"
 	iredis "github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/redis"
+	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/webhook"
 	"github.com/tomsk-smart-tech/mws-week-one/sync-server/internal/websocket"
 )
 
@@ -23,10 +25,17 @@ func main() {
 	redisURL := envOrDefault("REDIS_URL", "redis://localhost:6379")
 	gatewayURL := envOrDefault("GATEWAY_URL", "http://backend-gateway:8080")
 	snapshotSec := envOrDefault("SNAPSHOT_INTERVAL_SEC", "10")
+	jwtSecret := envOrDefault("JWT_SECRET", "") // empty = skip verification (dev mode)
 
 	snapshotInterval, err := time.ParseDuration(snapshotSec + "s")
 	if err != nil {
 		snapshotInterval = 10 * time.Second
+	}
+
+	// --------------- JWT Secret ---------------
+	websocket.SetJWTSecret(jwtSecret)
+	if jwtSecret == "" {
+		log.Println("[WARN] JWT_SECRET is empty — running in dev mode (signature verification disabled)")
 	}
 
 	// --------------- Redis Broker ---------------
@@ -52,6 +61,12 @@ func main() {
 	// Mock REST API
 	mux.HandleFunc("/api/login", api.HandleLogin)
 	mux.HandleFunc("/api/tables", api.HandleTables)
+
+	// Webhook: MWS table update notifications
+	mux.HandleFunc("/webhooks/mws-update", webhook.HandleMWSUpdate(hub))
+
+	// Prometheus metrics
+	mux.Handle("/metrics", promhttp.Handler())
 
 	// Health check
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {

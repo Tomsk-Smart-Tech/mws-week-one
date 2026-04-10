@@ -32,10 +32,16 @@ sync-server/
 │   ├── server/main.go              # Точка входа, HTTP-мультиплексор, graceful shutdown
 │   └── loadtester/main.go          # Утилита стресс-тестирования (100+ ботов)
 ├── internal/
+│   ├── auth/
+│   │   └── jwt.go                  # JWT парсинг (HMAC-SHA256) + генерация цвета курсора
+│   ├── metrics/
+│   │   └── metrics.go              # Prometheus метрики (Gauge/Counter)
+│   ├── webhook/
+│   │   └── handler.go              # POST /webhooks/mws-update → broadcast reload_table
 │   ├── websocket/
-│   │   ├── hub.go                  # Hub + Room management, broadcast, snapshot integration
-│   │   ├── client.go               # Client: read/write pump, ping/pong keepalive
-│   │   └── handler.go              # HTTP → WebSocket upgrade, парсинг doc_id и token
+│   │   ├── hub.go                  # Hub + Room management, broadcast, awareness, metrics
+│   │   ├── client.go               # Client: read/write pump, system events channel
+│   │   └── handler.go              # HTTP → WS upgrade, JWT auth, cursor color injection
 │   ├── redis/
 │   │   └── pubsub.go               # Redis Pub/Sub broker
 │   ├── snapshot/
@@ -91,6 +97,7 @@ curl http://localhost:8081/api/tables
 | `REDIS_URL`             | `redis://localhost:6379`         | URL подключения к Redis                         |
 | `GATEWAY_URL`           | `http://backend-gateway:8080`    | URL Java/Kotlin бэкенда для snapshot POST       |
 | `SNAPSHOT_INTERVAL_SEC` | `10`                             | Интервал автосохранения snapshot (секунды)       |
+| `JWT_SECRET`            | *(пусто)*                        | HMAC-SHA256 секрет для JWT. Пусто = dev-режим   |
 
 ## Подключение фронтенда
 
@@ -115,10 +122,48 @@ ws.onmessage = (event) => {
 ```
 
 ### Протокол
-- Все сообщения — **бинарные** (`Uint8Array` / `ArrayBuffer`).
-- Текстовые сообщения игнорируются сервером.
-- Сервер не модифицирует данные — пересылает as-is.
+- **Binary** сообщения — CRDT-дельты (`Uint8Array`), пересылаются as-is.
+- **Text** сообщения — JSON-события от сервера (`awareness`, `reload_table`).
+- Текстовые сообщения от клиента игнорируются.
 - Ping/Pong keepalive: сервер шлёт ping каждые 54 секунды, таймаут — 60 секунд.
+
+## Webhook Router (MWS Table Sync)
+
+При обновлении данных в MWS Tables, Kotlin Gateway пересылает уведомление:
+
+```bash
+curl -X POST http://localhost:8081/webhooks/mws-update \
+  -H "Content-Type: application/json" \
+  -d '{"table_id": "tbl_001", "action": "row_updated"}'
+```
+
+Go-сервер рассылает всем подключённым клиентам JSON-событие:
+```json
+{"type": "system", "action": "reload_table", "table_id": "tbl_001"}
+```
+
+## JWT Auth & Secure Awareness
+
+- Токен передаётся через `?token=...` или заголовок `Authorization: Bearer <token>`.
+- Сервер парсит JWT (HMAC-SHA256), извлекает `user_id`, `name`, `cursor_color`.
+- **Server-authoritative:** На подключении сервер отправляет клиенту `awareness` JSON с проверенными данными — клиент не может подделать имя через DevTools.
+- В dev-режиме (`JWT_SECRET` пуст) принимаются legacy-токены `fake-jwt-token-for-{name}`.
+
+## Prometheus Metrics
+
+Эндпоинт: `GET http://localhost:8081/metrics`
+
+| Метрика | Тип | Описание |
+|---------|-----|----------|
+| `sync_server_active_ws_connections` | Gauge | Текущие WS соединения |
+| `sync_server_active_rooms` | Gauge | Активные комнаты |
+| `sync_server_crdt_deltas_total` | Counter | Принятых CRDT-дельт |
+| `sync_server_messages_broadcast_total` | Counter | Отправленных broadcast |
+| `sync_server_messages_dropped_total` | Counter | Дропов (slow clients) |
+| `sync_server_snapshot_saves_total` | Counter | Snapshot-сохранений |
+| `sync_server_webhook_events_total` | Counter | Webhook-уведомлений |
+
+Grafana дашборд провижнится автоматически на `http://localhost:3001` (`admin`/`wikilive`).
 
 ## Snapshot Worker
 
